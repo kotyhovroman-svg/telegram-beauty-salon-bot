@@ -1,0 +1,12 @@
+# Секретные файлы и ключи
+.env
+credentials.json
+
+# Виртуальное окружение Python
+venv/
+.venv/
+env/
+
+# Кэш Python
+__pycache__/
+*.pyc
