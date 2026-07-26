@@ -18,15 +18,13 @@ booking_data = {}
 
 # --- НАСТРОЙКА GOOGLE SHEETS ---
 def append_to_sheet(row_data):
-    """Функция добавления строки с записью в Google Таблицу"""
+    """Авторизация через OAuth Client ID (Desktop App)"""
     try:
-        scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        # Используем файл ключа сервисного аккаунта
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        client = gspread.authorize(creds)
+        # Бот будет искать файл client_secret.json и создаст рядом authorized_user.json
+        client = gspread.oauth(
+            credentials_filename='client_secret.json',
+            authorized_user_filename='authorized_user.json'
+        )
         sheet = client.open(SPREADSHEET_NAME).sheet1
         sheet.append_row(row_data)
     except Exception as e:

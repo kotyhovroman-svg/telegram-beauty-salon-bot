@@ -10,3 +10,9 @@ env/
 # Кэш Python
 __pycache__/
 *.pyc
+
+.env
+client_secret.json
+authorized_user.json
+venv/
+__pycache__/
