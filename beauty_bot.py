@@ -51,7 +51,7 @@ def update_schedule_with_dates(days_ahead=7):
             if date_str not in existing_dates:
                 for hour in working_hours:
                     for service in services:
-                        rows_to_add.append([date_str, hour, service, "Свободно"])
+                        rows_to_add.append([date_str, hour, service, "Свободно", "", ""])
 
         if rows_to_add:
             sheet.append_rows(rows_to_add)
@@ -100,17 +100,22 @@ def get_available_hours(selected_service, selected_day):
         return []
 
 
-def book_schedule_slot(date, time, service):
-    """Меняет статус конкретного окна на 'Занято' на листе Расписание"""
+def book_schedule_slot(date, time, service, user):
+    """Меняет статус конкретного окна на 'Занято' и записывает данные клиента"""
     try:
         client = get_gspread_client()
         sheet = client.open(SPREADSHEET_NAME).worksheet("Расписание")
         records = sheet.get_all_records()
 
+        user_id = str(user.id)
+        user_name = f"@{user.username}" if user.username else user.first_name
+
         for i, row in enumerate(records, start=2):
             if str(row.get('Дата')) == date and str(row.get('Время')) == time and row.get('Услуга') == service:
                 sheet.update_cell(i, 4, "Занято")
-                print(f"🔒 Окно {date} {time} ({service}) успешно забронировано.")
+                sheet.update_cell(i, 5, user_id)
+                sheet.update_cell(i, 6, user_name)
+                print(f"🔒 Окно {date} {time} ({service}) успешно забронировано за {user_name}.")
                 break
     except Exception as e:
         print(f"❌ Ошибка при бронировании слота: {e}")
@@ -129,18 +134,86 @@ def append_to_sheet(row_data):
 
 # --- ЛОГИКА ИНТЕРФЕЙСА БОТА ---
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+def get_main_keyboard():
+    """Главная клавиатура бота"""
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     btn1 = types.KeyboardButton("💅 Записаться на маникюр")
     btn2 = types.KeyboardButton("👣 Записаться на педикюр")
-    markup.add(btn1, btn2)
+    btn3 = types.KeyboardButton("📋 Мои записи")
+    keyboard.add(btn1, btn2)
+    keyboard.add(btn3)
+    return keyboard
 
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
     bot.send_message(
         message.chat.id,
-        "Добро пожаловать в студию Nail Studio! ✨\nНажмите кнопку ниже для записи:",
-        reply_markup=markup
+        "Добро пожаловать в студию Nail Studio! ✨\nВыберите действие в меню ниже:",
+        reply_markup=get_main_keyboard()
     )
+
+
+@bot.message_handler(func=lambda message: message.text == "📋 Мои записи")
+def show_my_bookings(message):
+    try:
+        user_id = str(message.from_user.id)
+        client = get_gspread_client()
+        sheet = client.open(SPREADSHEET_NAME).worksheet("Расписание")
+        all_rows = sheet.get_all_values()
+
+        user_bookings = []
+        # Пробегаем по строкам (пропуская заголовок)
+        for index, row in enumerate(all_rows[1:], start=2):
+            if len(row) >= 5 and row[4] == user_id and row[3] == "Занято":
+                user_bookings.append({
+                    'row': index,
+                    'date': row[0],
+                    'time': row[1],
+                    'service': row[2]
+                })
+
+        if not user_bookings:
+            bot.send_message(message.chat.id, "У вас пока нет активных записей.", reply_markup=get_main_keyboard())
+            return
+
+        bot.send_message(message.chat.id, "<b>Ваши текущие записи:</b>", parse_mode="HTML")
+
+        # Отправляем карточку с кнопкой "Отменить"
+        for item in user_bookings:
+            text = f"📅 <b>Дата:</b> {item['date']}\n⏰ <b>Время:</b> {item['time']}\n💅 <b>Услуга:</b> {item['service']}"
+            keyboard = types.InlineKeyboardMarkup()
+            btn_cancel = types.InlineKeyboardButton("❌ Отменить запись", callback_data=f"cancel_{item['row']}")
+            keyboard.add(btn_cancel)
+            bot.send_message(message.chat.id, text, reply_markup=keyboard, parse_mode="HTML")
+
+    except Exception as e:
+        bot.send_message(message.chat.id, "Произошла ошибка при поиске записей.")
+        print(f"Ошибка в Мои записи: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_"))
+def cancel_booking_callback(call):
+    try:
+        row_number = int(call.data.split("_")[1])
+        client = get_gspread_client()
+        sheet = client.open(SPREADSHEET_NAME).worksheet("Расписание")
+
+        # Очищаем данные в Google Таблице
+        sheet.update_cell(row_number, 4, "Свободно")
+        sheet.update_cell(row_number, 5, "")
+        sheet.update_cell(row_number, 6, "")
+
+        bot.answer_callback_query(call.id, "Запись успешно отменена!")
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="❌ <b>Запись отменена.</b>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        bot.answer_callback_query(call.id, "Ошибка при отмене.")
+        print(f"Ошибка отмены: {e}")
 
 
 @bot.message_handler(func=lambda message: message.text in ["💅 Записаться на маникюр", "👣 Записаться на педикюр"])
@@ -149,7 +222,6 @@ def start_booking(message):
     if chat_id not in booking_data:
         booking_data[chat_id] = {}
 
-    # Определяем услугу по нажатой кнопке
     chosen_service = "Маникюр" if "маникюр" in message.text.lower() else "Педикюр"
     booking_data[chat_id]['service'] = chosen_service
 
@@ -166,7 +238,7 @@ def start_booking(message):
     bot.send_message(chat_id, "Выберите удобный день:", reply_markup=markup)
 
 
-@bot.callback_query_handler(func=lambda call: True)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("day_") or call.data.startswith("time_"))
 def callback_handler(call):
     chat_id = call.message.chat.id
     if chat_id not in booking_data:
@@ -216,21 +288,19 @@ def process_phone_step(message):
 
     data = booking_data.get(chat_id, {})
 
-    # Защита от сбоя: проверяем, что все данные собраны
     if not all(k in data for k in ("date", "time", "service", "name")):
-        bot.send_message(chat_id, "Произошла ошибка при записи. Пожалуйста, начните заново командой /start",
-                         reply_markup=types.ReplyKeyboardRemove())
+        bot.send_message(chat_id, "Произошла ошибка при записи. Пожалуйста, начните заново.",
+                         reply_markup=get_main_keyboard())
         return
 
-    # Подготовка данных
     full_time_info = f"{data['date']} в {data['time']}"
     row = [full_time_info, data['name'], phone, data['service'], "Любой мастер"]
 
     # 1. Запись на главный лист
     append_to_sheet(row)
 
-    # 2. Блокировка времени в расписании
-    book_schedule_slot(data['date'], data['time'], data['service'])
+    # 2. Блокировка времени в расписании (передаем message.from_user для ID)
+    book_schedule_slot(data['date'], data['time'], data['service'], message.from_user)
 
     # 3. Сообщения
     bot.send_message(
@@ -242,7 +312,7 @@ def process_phone_step(message):
         f"• Имя: {data['name']}\n"
         f"• Телефон: {phone}",
         parse_mode="Markdown",
-        reply_markup=types.ReplyKeyboardRemove()
+        reply_markup=get_main_keyboard()  # Возвращаем главное меню вместо скрытия кнопок
     )
 
     if ADMIN_CHAT_ID:
@@ -252,7 +322,6 @@ def process_phone_step(message):
         except Exception as e:
             print(f"Не удалось отправить уведомление администратору: {e}")
 
-    # Очищаем память
     booking_data.pop(chat_id, None)
 
 
@@ -260,8 +329,6 @@ def process_phone_step(message):
 
 if __name__ == '__main__':
     print("Проверка расписания...")
-    # При каждом старте скрипта дописываем дни, которых не хватает (на 7 дней вперед)
     update_schedule_with_dates(days_ahead=7)
-
     print("✅ Бот успешно запущен и готов к работе!")
     bot.infinity_polling()
